@@ -1,0 +1,43 @@
+# Copyright The Kubernetes Authors.
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+{{- if .Values.openshift }}
+---
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: {{ include "dra-driver-cpu.fullname" . }}
+  labels:
+    {{- include "dra-driver-cpu.labels" . | nindent 4 }}
+allowPrivilegedContainer: {{ .Values.openshift.scc.allowPrivilegedContainer }}
+allowHostDirVolumePlugin: {{ .Values.openshift.scc.allowHostDirVolumePlugin }}
+allowHostNetwork: {{ .Values.openshift.scc.allowHostNetwork }}
+allowHostPID: {{ .Values.openshift.scc.allowHostPID }}
+allowHostPorts: {{ .Values.openshift.scc.allowHostPorts }}
+allowHostIPC: {{ .Values.openshift.scc.allowHostIPC }}
+readOnlyRootFilesystem: {{ .Values.openshift.scc.readOnlyRootFilesystem }}
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+fsGroup:
+  type: RunAsAny
+supplementalGroups:
+  type: RunAsAny
+volumes:
+- configMap
+- hostPath
+- projected
+users:
+- system:serviceaccount:{{ .Release.Namespace }}:{{ include "dra-driver-cpu.fullname" . }}
+{{- end }}
