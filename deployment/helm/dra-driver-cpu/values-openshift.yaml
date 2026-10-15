@@ -1,0 +1,9 @@
+openshift:
+  scc:
+    allowPrivilegedContainer: false
+    allowHostDirVolumePlugin: true
+    allowHostNetwork: true
+    allowHostPID: false
+    allowHostPorts: true
+    allowHostIPC: false
+    readOnlyRootFilesystem: false
