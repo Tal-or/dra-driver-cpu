@@ -19,7 +19,6 @@ package openshiftconfig
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -33,7 +32,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/cpuset"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,19 +54,20 @@ func TestSetup_RequiresNodeGroup(t *testing.T) {
 	assert.Contains(t, err.Error(), "node group")
 }
 
-func TestSetup_DiscoversReservedFromKubeletConfig(t *testing.T) {
-	kc := kubeletConfig("worker-kc", "0-3", defaultPoolSelector)
-	clients := makeClients(t, true, kc, defaultMCP())
+func TestSetup_DiscoversReservedFromPerformanceProfile(t *testing.T) {
+	pp := performanceProfile("worker-pp", "0-3", defaultNodeSelector, nil)
+	clients := makeClients(t, true, pp, defaultMCP())
 
 	result, err := Setup(context.Background(), testr.New(t), clients, defaultOpts())
 	require.NoError(t, err)
 	assertReserved(t, "0-3", result.ReservedCPUs)
 }
 
-func TestSetup_FiltersKubeletConfigByNodeGroup(t *testing.T) {
-	kc := kubeletConfig("worker-kc", "0,2", defaultPoolSelector)
-	other := kubeletConfig("master-kc", "0-7", map[string]string{"pools.operator.machineconfiguration.openshift.io/master": ""})
-	clients := makeClients(t, true, kc, other, defaultMCP())
+func TestSetup_SelectsProfileByNodeGroup(t *testing.T) {
+	workerPP := performanceProfile("worker-pp", "0,2", defaultNodeSelector, nil)
+	masterPP := performanceProfile("master-pp", "0-7",
+		map[string]string{"node-role.kubernetes.io/master": ""}, nil)
+	clients := makeClients(t, true, workerPP, masterPP, defaultMCP())
 
 	result, err := Setup(context.Background(), testr.New(t), clients, defaultOpts())
 	require.NoError(t, err)
@@ -78,9 +77,8 @@ func TestSetup_FiltersKubeletConfigByNodeGroup(t *testing.T) {
 func TestSetup_AnnotatesPerformanceProfile(t *testing.T) {
 	shortenMCPTimeouts(t)
 
-	kc := kubeletConfig("worker-kc", "0-1", defaultPoolSelector)
-	pp := performanceProfile("worker-pp", defaultNodeSelector, nil)
-	clients := makeClients(t, true, kc, pp, defaultMCP())
+	pp := performanceProfile("worker-pp", "0-1", defaultNodeSelector, nil)
+	clients := makeClients(t, true, pp, defaultMCP())
 
 	// Simulate MCO reacting: Updating=True then Updated=True.
 	go simulateMCPRollout(t, clients.API, defaultNodeGroup)
@@ -96,9 +94,8 @@ func TestSetup_AnnotatesPerformanceProfile(t *testing.T) {
 }
 
 func TestSetup_SkipsAnnotationWhenAlreadySet(t *testing.T) {
-	kc := kubeletConfig("worker-kc", "0-1", defaultPoolSelector)
-	pp := performanceProfile("worker-pp", defaultNodeSelector, map[string]string{DRAResourceManagementAnnotation: "true"})
-	clients := makeClients(t, true, kc, pp, defaultMCP())
+	pp := performanceProfile("worker-pp", "0-1", defaultNodeSelector, map[string]string{DRAResourceManagementAnnotation: "true"})
+	clients := makeClients(t, true, pp, defaultMCP())
 
 	opts := defaultOpts()
 	opts.EnableDRAAnnotation = true
@@ -111,9 +108,8 @@ func TestSetup_SkipsAnnotationWhenAlreadySet(t *testing.T) {
 }
 
 func TestSetup_ErrorsWhenNoMatchingProfile(t *testing.T) {
-	kc := kubeletConfig("worker-kc", "0-1", defaultPoolSelector)
-	pp := performanceProfile("master-pp", map[string]string{"node-role.kubernetes.io/master": ""}, nil)
-	clients := makeClients(t, true, kc, pp, defaultMCP())
+	pp := performanceProfile("master-pp", "0-1", map[string]string{"node-role.kubernetes.io/master": ""}, nil)
+	clients := makeClients(t, true, pp, defaultMCP())
 
 	opts := defaultOpts()
 	opts.EnableDRAAnnotation = true
@@ -127,9 +123,8 @@ func TestSetup_ErrorsWhenNoMatchingProfile(t *testing.T) {
 }
 
 func TestSetup_DryRunDoesNotAnnotate(t *testing.T) {
-	kc := kubeletConfig("worker-kc", "0-1", defaultPoolSelector)
-	pp := performanceProfile("worker-pp", defaultNodeSelector, nil)
-	clients := makeClients(t, true, kc, pp, defaultMCP())
+	pp := performanceProfile("worker-pp", "0-1", defaultNodeSelector, nil)
+	clients := makeClients(t, true, pp, defaultMCP())
 	opts := defaultOpts()
 	opts.EnableDRAAnnotation = true
 	opts.DryRun = true
@@ -143,19 +138,20 @@ func TestSetup_DryRunDoesNotAnnotate(t *testing.T) {
 	assert.Empty(t, got.Annotations[DRAResourceManagementAnnotation])
 }
 
-func TestSetup_NoReservedSource(t *testing.T) {
+func TestSetup_NoMatchingPerformanceProfile(t *testing.T) {
 	clients := makeClients(t, true, defaultMCP())
 	_, err := Setup(context.Background(), testr.New(t), clients, defaultOpts())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no KubeletConfig")
+	assert.Contains(t, err.Error(), "no PerformanceProfile matches")
 }
 
 func TestRun_PrintsReservedCPUs(t *testing.T) {
-	kc := kubeletConfig("worker-kc", "0-1", defaultPoolSelector)
-	clients := makeClients(t, true, kc, defaultMCP())
+	pp := performanceProfile("worker-pp", "0-1", defaultNodeSelector, nil)
+	clients := makeClients(t, true, pp, defaultMCP())
 
 	var stdout bytes.Buffer
 	err := Run([]string{
+		"--kubeconfig", "/dev/null",
 		"--node-group", defaultNodeGroup,
 	}, Options{
 		Logger: logr.Discard(),
@@ -274,8 +270,8 @@ func (c *notOpenShiftClient) List(ctx context.Context, list client.ObjectList, o
 	return c.Client.List(ctx, list, opts...)
 }
 
-func performanceProfile(name string, nodeSelector, annotations map[string]string) *performancev2.PerformanceProfile {
-	reserved := performancev2.CPUSet("0-1")
+func performanceProfile(name, reserved string, nodeSelector, annotations map[string]string) *performancev2.PerformanceProfile {
+	reservedCPUs := performancev2.CPUSet(reserved)
 	isolated := performancev2.CPUSet("4-7")
 	return &performancev2.PerformanceProfile{
 		TypeMeta: metav1.TypeMeta{
@@ -288,36 +284,12 @@ func performanceProfile(name string, nodeSelector, annotations map[string]string
 		},
 		Spec: performancev2.PerformanceProfileSpec{
 			CPU: &performancev2.CPU{
-				Reserved: &reserved,
+				Reserved: &reservedCPUs,
 				Isolated: &isolated,
 			},
 			NodeSelector: nodeSelector,
 		},
 	}
-}
-
-func kubeletConfig(name, reserved string, poolSelector map[string]string) *mcov1.KubeletConfig {
-	kc := &mcov1.KubeletConfig{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: mcov1.GroupVersion.String(),
-			Kind:       "KubeletConfig",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       mcov1.KubeletConfigSpec{},
-	}
-	if poolSelector != nil {
-		kc.Spec.MachineConfigPoolSelector = &metav1.LabelSelector{MatchLabels: poolSelector}
-	}
-	kubelet := map[string]string{}
-	if reserved != "" {
-		kubelet["reservedSystemCPUs"] = reserved
-	}
-	raw, err := json.Marshal(kubelet)
-	if err != nil {
-		panic(err)
-	}
-	kc.Spec.KubeletConfig = &runtime.RawExtension{Raw: raw}
-	return kc
 }
 
 func machineConfigPool(name string, labels, nodeSelector map[string]string) *mcov1.MachineConfigPool {

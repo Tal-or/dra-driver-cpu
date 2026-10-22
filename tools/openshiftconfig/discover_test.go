@@ -19,54 +19,57 @@ package openshiftconfig
 import (
 	"testing"
 
+	performancev2 "github.com/openshift/cluster-node-tuning-operator/pkg/apis/performanceprofile/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/cpuset"
 )
 
-func TestReservedFromKubeletConfig(t *testing.T) {
-	kc := kubeletConfig("kc", "0,1", nil)
-	got, found, err := reservedFromKubeletConfig(kc)
+func TestReservedFromProfile(t *testing.T) {
+	pp := performanceProfile("pp", "0,1", defaultNodeSelector, nil)
+	got, err := reservedFromProfile(pp)
 	require.NoError(t, err)
-	require.True(t, found)
 	want, err := cpuset.Parse("0,1")
 	require.NoError(t, err)
 	assert.True(t, want.Equals(*got))
 }
 
-func TestReservedFromKubeletConfig_JSONBlob(t *testing.T) {
-	kc := kubeletConfig("kc-json", "", nil)
-	kc.Spec.KubeletConfig.Raw = []byte(`{"reservedSystemCPUs":"4-7"}`)
-	got, found, err := reservedFromKubeletConfig(kc)
+func TestReservedFromProfile_Range(t *testing.T) {
+	pp := performanceProfile("pp", "4-7", defaultNodeSelector, nil)
+	got, err := reservedFromProfile(pp)
 	require.NoError(t, err)
-	require.True(t, found)
 	want, err := cpuset.Parse("4-7")
 	require.NoError(t, err)
 	assert.True(t, want.Equals(*got))
 }
 
-func TestReservedFromKubeletConfig_Absent(t *testing.T) {
-	kc := kubeletConfig("kc", "", nil)
-	_, found, err := reservedFromKubeletConfig(kc)
-	require.NoError(t, err)
-	assert.False(t, found)
+func TestReservedFromProfile_NoCPU(t *testing.T) {
+	pp := performanceProfile("pp", "0-1", defaultNodeSelector, nil)
+	pp.Spec.CPU = nil
+	_, err := reservedFromProfile(pp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no reserved CPUs defined")
 }
 
-func TestKubeletConfigSelectsPool(t *testing.T) {
-	mcp := defaultMCP()
+func TestReservedFromProfile_NilReserved(t *testing.T) {
+	pp := performanceProfile("pp", "0-1", defaultNodeSelector, nil)
+	pp.Spec.CPU.Reserved = nil
+	_, err := reservedFromProfile(pp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no reserved CPUs defined")
+}
 
-	withSelector := kubeletConfig("with", "0-1", defaultPoolSelector)
-	assert.True(t, kubeletConfigSelectsPool(withSelector, mcp))
-
-	wrongSelector := kubeletConfig("wrong", "0-1", map[string]string{"pools.operator.machineconfiguration.openshift.io/master": ""})
-	assert.False(t, kubeletConfigSelectsPool(wrongSelector, mcp))
-
-	noSelector := kubeletConfig("none", "0-1", nil)
-	assert.False(t, kubeletConfigSelectsPool(noSelector, mcp))
+func TestReservedFromProfile_Empty(t *testing.T) {
+	pp := performanceProfile("pp", "0-1", defaultNodeSelector, nil)
+	empty := performancev2.CPUSet("")
+	pp.Spec.CPU.Reserved = &empty
+	_, err := reservedFromProfile(pp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty reserved CPUs")
 }
 
 func TestProfileMatchesNodeGroup(t *testing.T) {
-	pp := performanceProfile("pp", defaultNodeSelector, nil)
+	pp := performanceProfile("pp", "0-1", defaultNodeSelector, nil)
 
 	workerNG := &nodeGroup{mcp: defaultMCP()}
 	assert.True(t, profileMatchesNodeGroup(pp, workerNG))

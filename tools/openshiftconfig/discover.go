@@ -17,52 +17,48 @@ limitations under the License.
 package openshiftconfig
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"strings"
 
 	mcov1 "github.com/openshift/api/machineconfiguration/v1"
 	performancev2 "github.com/openshift/cluster-node-tuning-operator/pkg/apis/performanceprofile/v2"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	"k8s.io/utils/cpuset"
-	"sigs.k8s.io/yaml"
 )
 
-func reservedFromKubeletConfig(kc *mcov1.KubeletConfig) (*cpuset.CPUSet, bool, error) {
-	if kc.Spec.KubeletConfig == nil || len(kc.Spec.KubeletConfig.Raw) == 0 {
-		return nil, false, nil
+// findMatchingProfile returns the PerformanceProfile whose nodeSelector
+// matches the MCP's nodeSelector.
+func findMatchingProfile(ctx context.Context, clients Clients, ng *nodeGroup) (*performancev2.PerformanceProfile, error) {
+	list := &performancev2.PerformanceProfileList{}
+	if err := clients.API.List(ctx, list); err != nil {
+		return nil, fmt.Errorf("listing PerformanceProfiles: %w", err)
 	}
-	var kubeletCfg kubeletconfigv1beta1.KubeletConfiguration
-	if err := yaml.Unmarshal(kc.Spec.KubeletConfig.Raw, &kubeletCfg); err != nil {
-		return nil, false, fmt.Errorf("reading reservedSystemCPUs from KubeletConfig %q: %w", kc.Name, err)
+	for i := range list.Items {
+		if profileMatchesNodeGroup(&list.Items[i], ng) {
+			return &list.Items[i], nil
+		}
 	}
-	raw := strings.TrimSpace(kubeletCfg.ReservedSystemCPUs)
+	return nil, fmt.Errorf("no PerformanceProfile matches node group %q", ng.mcp.Name)
+}
+
+// reservedFromProfile extracts the reserved CPU set from a PerformanceProfile.
+func reservedFromProfile(pp *performancev2.PerformanceProfile) (*cpuset.CPUSet, error) {
+	if pp.Spec.CPU == nil || pp.Spec.CPU.Reserved == nil {
+		return nil, fmt.Errorf("PerformanceProfile %q has no reserved CPUs defined", pp.Name)
+	}
+	raw := strings.TrimSpace(string(*pp.Spec.CPU.Reserved))
 	if raw == "" {
-		return nil, false, nil
+		return nil, fmt.Errorf("PerformanceProfile %q has empty reserved CPUs", pp.Name)
 	}
 	parsed, err := cpuset.Parse(raw)
 	if err != nil {
-		return nil, false, fmt.Errorf("KubeletConfig %q reservedSystemCPUs %q: %w", kc.Name, raw, err)
+		return nil, fmt.Errorf("PerformanceProfile %q reserved CPUs %q: %w", pp.Name, raw, err)
 	}
 	if parsed.IsEmpty() {
-		return nil, false, nil
+		return nil, fmt.Errorf("PerformanceProfile %q has empty reserved CPU set", pp.Name)
 	}
-	return &parsed, true, nil
-}
-
-// kubeletConfigSelectsPool checks whether a KubeletConfig targets
-// the given MCP via its machineConfigPoolSelector.
-func kubeletConfigSelectsPool(kc *mcov1.KubeletConfig, mcp *mcov1.MachineConfigPool) bool {
-	if kc.Spec.MachineConfigPoolSelector == nil {
-		return false
-	}
-	selector, err := metav1.LabelSelectorAsSelector(kc.Spec.MachineConfigPoolSelector)
-	if err != nil {
-		return false
-	}
-	return !selector.Empty() && selector.Matches(labels.Set(mcp.Labels))
+	return &parsed, nil
 }
 
 // profileMatchesNodeGroup checks whether a PerformanceProfile targets exactly
