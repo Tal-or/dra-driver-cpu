@@ -29,11 +29,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/utils/cpuset"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// nodeGroup holds the MCP that scopes which KubeletConfigs to consider.
+// nodeGroup holds the MCP used to match PerformanceProfiles by nodeSelector.
 type nodeGroup struct {
 	mcp *mcov1.MachineConfigPool
 }
@@ -46,8 +45,8 @@ type Clients struct {
 
 // SetupOptions configures how reserved CPUs are discovered.
 type SetupOptions struct {
-	// NodeGroup is the MachineConfigPool name that scopes which
-	// KubeletConfigs to consider. Required.
+	// NodeGroup is the MachineConfigPool name used to find the matching
+	// PerformanceProfile by nodeSelector. Required.
 	NodeGroup           string
 	DryRun              bool
 	EnableDRAAnnotation bool
@@ -58,8 +57,8 @@ type Result struct {
 	ReservedCPUs string
 }
 
-// Setup discovers reserved CPUs from KubeletConfigs on an OpenShift cluster
-// and sets the DRA management annotation on the matching PerformanceProfile.
+// Setup discovers reserved CPUs from the PerformanceProfile matching the
+// given MachineConfigPool and optionally sets the DRA management annotation.
 // The reserved CPU set is returned so callers can pass it to Helm.
 func Setup(ctx context.Context, logger logr.Logger, clients Clients, opts SetupOptions) (Result, error) {
 	if opts.NodeGroup == "" {
@@ -82,14 +81,20 @@ func Setup(ctx context.Context, logger logr.Logger, clients Clients, opts SetupO
 		return Result{}, err
 	}
 
-	reserved, err := discoverReserved(ctx, logger, clients, ng)
+	pp, err := findMatchingProfile(ctx, clients, ng)
 	if err != nil {
 		return Result{}, err
 	}
 
+	reserved, err := reservedFromProfile(pp)
+	if err != nil {
+		return Result{}, err
+	}
+	logger.Info("using reserved CPUs from PerformanceProfile", "name", pp.Name, "reservedCPUs", reserved.String())
+
 	if opts.EnableDRAAnnotation {
 		logger.Info("enabling DRA management annotation")
-		if err := annotatePerformanceProfile(ctx, logger, clients, ng, opts.DryRun); err != nil {
+		if err := annotateProfile(ctx, logger, clients, pp, ng, opts.DryRun); err != nil {
 			return Result{}, fmt.Errorf("annotating PerformanceProfile: %w", err)
 		}
 	}
@@ -115,73 +120,31 @@ func resolveNodeGroup(ctx context.Context, clients Clients, name string) (*nodeG
 	return &nodeGroup{mcp: mcp}, nil
 }
 
-func discoverReserved(ctx context.Context, logger logr.Logger, clients Clients, ng *nodeGroup) (*cpuset.CPUSet, error) {
-	list := &mcov1.KubeletConfigList{}
-	if err := clients.API.List(ctx, list); err != nil {
-		return nil, fmt.Errorf("listing KubeletConfigs: %w", err)
-	}
-
-	for i := range list.Items {
-		kc := &list.Items[i]
-		if !kubeletConfigSelectsPool(kc, ng.mcp) {
-			logger.V(4).Info("skipping KubeletConfig; does not target node group", "name", kc.Name, "nodeGroup", ng.mcp.Name)
-			continue
-		}
-		reserved, found, err := reservedFromKubeletConfig(kc)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			continue
-		}
-		logger.Info("using reserved CPUs from KubeletConfig", "name", kc.Name, "reservedCPUs", reserved.String())
-		return reserved, nil
-	}
-	return nil, fmt.Errorf("no KubeletConfig with reservedSystemCPUs found for node group %q", ng.mcp.Name)
-}
-
-// annotatePerformanceProfile finds the PerformanceProfile whose nodeSelector
-// matches the MCP and sets the DRA management annotation on it.
-func annotatePerformanceProfile(ctx context.Context, logger logr.Logger, clients Clients, ng *nodeGroup, dryRun bool) error {
-	list := &performancev2.PerformanceProfileList{}
-	err := clients.API.List(ctx, list)
-	if err != nil {
-		return fmt.Errorf("listing PerformanceProfiles: %w", err)
-	}
-	if len(list.Items) == 0 {
-		return fmt.Errorf("no PerformanceProfile found; skipping annotation")
-	}
-
-	for i := range list.Items {
-		pp := &list.Items[i]
-		if !profileMatchesNodeGroup(pp, ng) {
-			continue
-		}
-		if annotationIsEnabled(pp) {
-			logger.Info("PerformanceProfile already has DRA management annotation", "name", pp.Name)
-			return nil
-		}
-		if dryRun {
-			logger.Info("dry-run: would set DRA management annotation", "name", pp.Name, "annotation", DRAResourceManagementAnnotation)
-			return nil
-		}
-		original := pp.DeepCopy()
-		if pp.Annotations == nil {
-			pp.Annotations = map[string]string{}
-		}
-		pp.Annotations[DRAResourceManagementAnnotation] = draResourceManagementValue
-		if err := clients.API.Patch(ctx, pp, client.MergeFrom(original)); err != nil {
-			return fmt.Errorf("annotating PerformanceProfile %q: %w", pp.Name, err)
-		}
-		logger.Info("set DRA management annotation on PerformanceProfile", "name", pp.Name)
-
-		if err := waitForMCPUpdate(ctx, logger, clients, ng); err != nil {
-			return fmt.Errorf("waiting for MachineConfigPool %q to finish updating after annotation: %w", ng.mcp.Name, err)
-		}
+// annotateProfile sets the DRA management annotation on the given
+// PerformanceProfile that was already matched to the node group.
+func annotateProfile(ctx context.Context, logger logr.Logger, clients Clients, pp *performancev2.PerformanceProfile, ng *nodeGroup, dryRun bool) error {
+	if annotationIsEnabled(pp) {
+		logger.Info("PerformanceProfile already has DRA management annotation", "name", pp.Name)
 		return nil
 	}
+	if dryRun {
+		logger.Info("dry-run: would set DRA management annotation", "name", pp.Name, "annotation", DRAResourceManagementAnnotation)
+		return nil
+	}
+	original := pp.DeepCopy()
+	if pp.Annotations == nil {
+		pp.Annotations = map[string]string{}
+	}
+	pp.Annotations[DRAResourceManagementAnnotation] = draResourceManagementValue
+	if err := clients.API.Patch(ctx, pp, client.MergeFrom(original)); err != nil {
+		return fmt.Errorf("annotating PerformanceProfile %q: %w", pp.Name, err)
+	}
+	logger.Info("set DRA management annotation on PerformanceProfile", "name", pp.Name)
 
-	return fmt.Errorf("no PerformanceProfile matches node group %s", ng.mcp.Name)
+	if err := waitForMCPUpdate(ctx, logger, clients, ng); err != nil {
+		return fmt.Errorf("waiting for MachineConfigPool %q to finish updating after annotation: %w", ng.mcp.Name, err)
+	}
+	return nil
 }
 
 // Waiter timeouts and polling interval. Package-level vars so tests can
