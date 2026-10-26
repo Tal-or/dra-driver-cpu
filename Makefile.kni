@@ -1,0 +1,66 @@
+# Copyright The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+OPENSHIFT_NAMESPACE ?= openshift-dra-driver-cpu
+OPENSHIFT_RELEASE ?= dra-driver-cpu
+
+# e2e tests variables ---------------------------------------------------------
+OPENSHIFT_E2E_NAMESPACE ?= openshift-dra-driver-cpu-e2e
+DRACPU_E2E_CPU_DEVICE_MODE ?= grouped
+DRACPU_E2E_CPU_GROUP_BY ?= numanode
+
+# deploy targets ------------------------------------------------------------
+.PHONY: deploy-openshift
+deploy-openshift:
+	KUBECONFIG="$(KUBECONFIG)" \
+	NODE_GROUP="$(NODE_GROUP)" \
+	./scripts/openshift/deploy.sh
+
+.PHONY: uninstall-openshift
+uninstall-openshift:
+	helm uninstall "$(OPENSHIFT_RELEASE)" \
+		--namespace "$(OPENSHIFT_NAMESPACE)" \
+		--kubeconfig "$(KUBECONFIG)"
+
+# ci tests targets ------------------------------------------------------------
+.PHONY: ci-openshift-e2e-setup
+ci-openshift-e2e-setup:
+	CPU_DEVICE_MODE="$(DRACPU_E2E_CPU_DEVICE_MODE)" \
+	CPU_GROUP_BY="$(DRACPU_E2E_CPU_GROUP_BY)" \
+	$(MAKE) -f Makefile.kni deploy-openshift RESERVED_CPUS="$(DRACPU_E2E_RESERVED_CPUS)"
+	@if ! oc --kubeconfig "$(KUBECONFIG)" get namespace "$(OPENSHIFT_E2E_NAMESPACE)" >/dev/null 2>&1; then \
+		echo "Creating namespace $(OPENSHIFT_E2E_NAMESPACE)"; \
+		oc --kubeconfig "$(KUBECONFIG)" create namespace "$(OPENSHIFT_E2E_NAMESPACE)"; \
+	fi
+	oc --kubeconfig "$(KUBECONFIG)" label namespace "$(OPENSHIFT_E2E_NAMESPACE)" \
+		pod-security.kubernetes.io/enforce=privileged \
+		pod-security.kubernetes.io/audit=privileged \
+		pod-security.kubernetes.io/warn=privileged \
+		--overwrite
+
+.PHONY: test-e2e-openshift
+test-e2e-openshift:
+	KUBECONFIG="$(KUBECONFIG)" \
+	DRACPU_E2E_RESERVED_CPUS="$(DRACPU_E2E_RESERVED_CPUS)" \
+	DRACPU_E2E_DAEMONSET_NAMESPACE="$(OPENSHIFT_NAMESPACE)" \
+	DRACPU_E2E_FIXTURE_NAMESPACE="$(OPENSHIFT_E2E_NAMESPACE)" \
+	$(MAKE) test-e2e
+
+.PHONY: ci-openshift-e2e-test
+ci-openshift-e2e-test: ci-openshift-e2e-setup test-e2e-openshift
+
+# unit tests targets -----------------------------------------------------------
+.PHONY: test-unit-openshift
+test-unit-openshift:
+	go -C tools/openshiftconfig test -count=1 ./...
