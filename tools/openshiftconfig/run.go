@@ -54,7 +54,7 @@ func Run(args []string, opts Options) error {
 	fs := flag.NewFlagSet("openshift-config", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: %s [flags]\n\nDiscover reserved CPUs from an OpenShift KubeletConfig, annotate the matching PerformanceProfile for DRA management, and print the reserved CPU set.\n\nFlags:\n", fs.Name())
+		fmt.Fprintf(fs.Output(), "Usage: %s [flags]\n\nDiscover reserved CPUs from the matching OpenShift PerformanceProfile, annotate it for DRA management, and print the reserved CPU set.\n\nFlags:\n", fs.Name())
 		fs.PrintDefaults()
 	}
 
