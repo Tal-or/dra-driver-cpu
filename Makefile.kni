@@ -19,6 +19,7 @@ OPENSHIFT_RELEASE ?= dra-driver-cpu
 OPENSHIFT_E2E_NAMESPACE ?= openshift-dra-driver-cpu-e2e
 DRACPU_E2E_CPU_DEVICE_MODE ?= grouped
 DRACPU_E2E_CPU_GROUP_BY ?= numanode
+DRACPU_E2E_RESERVED_CPUS ?= "0"
 
 # deploy targets ------------------------------------------------------------
 .PHONY: deploy-openshift
@@ -38,7 +39,7 @@ uninstall-openshift:
 ci-openshift-e2e-setup:
 	CPU_DEVICE_MODE="$(DRACPU_E2E_CPU_DEVICE_MODE)" \
 	CPU_GROUP_BY="$(DRACPU_E2E_CPU_GROUP_BY)" \
-	$(MAKE) -f Makefile.kni deploy-openshift RESERVED_CPUS="$(DRACPU_E2E_RESERVED_CPUS)"
+	$(MAKE) -f Makefile.kni deploy-openshift
 	@if ! oc --kubeconfig "$(KUBECONFIG)" get namespace "$(OPENSHIFT_E2E_NAMESPACE)" >/dev/null 2>&1; then \
 		echo "Creating namespace $(OPENSHIFT_E2E_NAMESPACE)"; \
 		oc --kubeconfig "$(KUBECONFIG)" create namespace "$(OPENSHIFT_E2E_NAMESPACE)"; \
